@@ -1,0 +1,27 @@
+# MiceScale Headscale coordination server unit.
+# Install to /etc/systemd/system/micescale-headscale.service.
+# Requires a dedicated `headscale` system user and /var/lib/headscale,
+# /var/run/headscale, and /etc/headscale set up by the operator.
+
+[Unit]
+Description=MiceScale Headscale coordination server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=headscale
+Group=headscale
+Type=simple
+ExecStart=/usr/bin/headscale serve
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+ReadWritePaths=/var/lib/headscale /var/run/headscale
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

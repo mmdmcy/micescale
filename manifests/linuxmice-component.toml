@@ -1,0 +1,41 @@
+schema_version = "linuxmice.component.v1"
+id = "katteke.micescale"
+display_name = "MiceScale"
+version = "0.1.0"
+summary = "Optional LinuxMice carrier provider that operationalizes self-hosted Headscale and WireGuard without third-party coordination."
+component_type = "provider"
+standalone = true
+platforms = ["debian", "ubuntu"]
+documentation = "https://github.com/mmdmcy/micescale"
+
+[installation]
+package = "micescale"
+service = "micescale-headscale.service"
+
+[capabilities]
+provides = ["carrier.headscale", "carrier.wireguard"]
+requires = []
+optional = ["tailscale-client"]
+
+[interfaces]
+mode = "command"
+commands = ["/usr/bin/micescale carrier policy --format json"]
+endpoints = []
+
+[authentication]
+required = []
+optional = ["preauth-key"]
+provides = []
+
+[data]
+ownership = "MiceScale carrier state: headscale database, pre-auth keys, and local node config."
+backup_responsibility = "The operator owns headscale database and policy backup; MiceScale documents the procedures."
+
+[health]
+kind = "command"
+read_only = true
+timeout_ms = 3000
+
+[health.command]
+executable = "/usr/bin/micescale"
+args = ["doctor", "--format", "json"]

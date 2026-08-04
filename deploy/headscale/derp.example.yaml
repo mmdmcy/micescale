@@ -1,0 +1,30 @@
+# Optional standalone DERP map. Only needed when the embedded DERP server is
+# disabled and you want a relayed fallback through this host or another one.
+#
+# Reference this file from headscale config:
+#
+#   derp:
+#     server:
+#       enabled: false
+#     urls: []
+#     paths:
+#       - /etc/headscale/derp.yaml
+#
+# A DERP relay sees relayed traffic in cleartext from Headscale's perspective
+# (TLS between client and relay, but the relay can observe streams). Prefer
+# direct WireGuard connections; DERP is a fallback, and the LinuxMice payload
+# envelope is the confidentiality boundary above the carrier.
+
+regions:
+  999:
+    regionid: 999
+    regioncode: "mice"
+    regionname: "MiceScale DERP"
+    nodes:
+      - name: "mice1"
+        regionid: 999
+        hostname: "derp.example.com"
+        ipv4: "192.0.2.10"
+        stunport: 3478
+        stunonly: false
+        derpport: 8765

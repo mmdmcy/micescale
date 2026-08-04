@@ -1,0 +1,71 @@
+# MiceScale Headscale server profile.
+
+# Copy to /etc/headscale/config.yaml and replace every placeholder value
+# (items in <angle brackets>). Never commit a real config: it contains the
+# coordination identity of your fleet.
+
+server_url: https://<control.example.com>
+
+listen_addr: 0.0.0.0:8080
+metrics_listen_addr: 127.0.0.1:9090
+grpc_listen_addr: 127.0.0.1:50443
+grpc_allow_insecure: false
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+
+derp:
+  # Embedded DERP gives clients a relay fallback when direct WireGuard
+  # connections fail (for example behind strict NAT). Disable it if every
+  # peer is on one LAN.
+  server:
+    enabled: true
+    region_id: 999
+    region_code: "mice"
+    region_name: "MiceScale Embedded DERP"
+    stun_listen_addr: "0.0.0.0:3478"
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+  urls: []
+  paths: []
+  auto_update_enabled: true
+  update_frequency: 24h
+
+database:
+  type: sqlite3
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+
+# TLS: prefer terminating TLS at a reverse proxy (Caddy, nginx) in front of
+# this service. Leave acme settings empty when you do.
+acme_url: https://acme-v02.api.letsencrypt.org/directory
+acme_email: ""
+tls_letsencrypt_hostname: ""
+tls_letsencrypt_cache_dir: /var/lib/headscale/cache
+tls_cert_path: ""
+tls_key_path: ""
+
+unix_socket: /var/run/headscale/headscale.sock
+unix_socket_permission: "0770"
+
+log:
+  level: info
+  format: text
+
+# Start with database-stored ACL policy and move to a tracked policy file
+# (docs/operations.md) once the fleet is established.
+policy:
+  mode: database
+  path: ""
+
+dns:
+  magic_dns: false
+  base_domain: example.com
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 9.9.9.9

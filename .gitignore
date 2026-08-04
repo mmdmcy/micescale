@@ -1,0 +1,7 @@
+/target
+*.lmenv
+.env
+config.toml
+*.jsonl
+/private/
+/deploy/headscale/db.sqlite
