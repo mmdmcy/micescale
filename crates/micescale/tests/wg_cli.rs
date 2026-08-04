@@ -7,6 +7,7 @@ const HUB_PRIV: &str = "aHViLXByaXZhdGUta2V5LWh1Yi1wcml2YXRlLWtleS0=";
 const HUB_PUB: &str = "aHViLXB1YmxpYy1rZXktaHViLXB1YmxpYy1rZXktaHU=";
 const CLIENT_PRIV: &str = "Y2xpZW50LXByaXZhdGUta2V5LWNsaWVudC1wcml2YXQ=";
 const CLIENT_PUB: &str = "Y2xpZW50LXB1YmxpYy1rZXktY2xpZW50LXB1YmxpYy0=";
+const SECOND_PUB: &str = "c2Vjb25kLXB1YmxpYy1rZXktc2Vjb25kLXB1YmxpYy0=";
 
 fn binary() -> PathBuf {
     env!("CARGO_BIN_EXE_micescale").into()
@@ -230,4 +231,246 @@ fn enroll_rejects_wireguard_carrier_with_guidance() {
     ]);
     assert_eq!(code, 2, "usage error expected");
     assert!(stderr.contains("wg client-init"), "{stderr}");
+}
+
+#[test]
+fn hub_remove_peer_and_duplicate_rejection() {
+    let env = setup(HUB_PRIV, HUB_PUB, HUB_DUMP);
+    for args in [
+        vec![
+            "wg",
+            "hub-init",
+            "--address",
+            "10.60.0.1/24",
+            "--endpoint",
+            "hub.example.com:51820",
+        ],
+        vec![
+            "wg",
+            "hub-add-peer",
+            "--name",
+            "laptop",
+            "--pubkey",
+            CLIENT_PUB,
+            "--address",
+            "10.60.0.2",
+        ],
+        vec![
+            "wg",
+            "hub-add-peer",
+            "--name",
+            "server",
+            "--pubkey",
+            SECOND_PUB,
+            "--address",
+            "10.60.0.3",
+        ],
+    ] {
+        let (code, _, stderr) = env.run(&args);
+        assert_eq!(code, 0, "step failed: {stderr}");
+    }
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "hub-add-peer",
+        "--name",
+        "laptop",
+        "--pubkey",
+        SECOND_PUB,
+        "--address",
+        "10.60.0.9",
+    ]);
+    assert_eq!(code, 1, "duplicate name must be rejected");
+    assert!(stderr.contains("already exists"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "hub-add-peer",
+        "--name",
+        "laptop2",
+        "--pubkey",
+        CLIENT_PUB,
+        "--address",
+        "10.60.0.4",
+    ]);
+    assert_eq!(code, 1, "duplicate pubkey must be rejected");
+    assert!(stderr.contains("already exists"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "hub-add-peer",
+        "--name",
+        "laptop3",
+        "--pubkey",
+        SECOND_PUB,
+        "--address",
+        "10.60.0.2",
+    ]);
+    assert_eq!(code, 1, "duplicate address must be rejected");
+    assert!(stderr.contains("already exists"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&["wg", "hub-remove-peer", "--name", "laptop"]);
+    assert_eq!(code, 0, "hub-remove-peer failed: {stderr}");
+
+    let hub_conf = env.file("hub.conf");
+    assert!(
+        !hub_conf.contains(CLIENT_PUB),
+        "removed peer must leave hub.conf"
+    );
+    assert!(hub_conf.contains(SECOND_PUB), "{hub_conf}");
+
+    let audit = fs::read_to_string(env.root.join("audit.jsonl")).unwrap();
+    assert!(audit.contains("wg-hub-remove-peer"), "{audit}");
+    assert!(!audit.contains(HUB_PRIV), "audit leaked the private key");
+
+    let (code, _, stderr) = env.run(&["wg", "hub-remove-peer", "--name", "ghost"]);
+    assert_eq!(code, 1, "removing a missing peer must fail");
+    assert!(stderr.contains("no peer named ghost"), "{stderr}");
+}
+
+#[test]
+fn validation_rejects_bad_inputs() {
+    let env = setup(HUB_PRIV, HUB_PUB, HUB_DUMP);
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "hub-init",
+        "--address",
+        "10.60.0.1/24",
+        "--endpoint",
+        "hub.example.com",
+    ]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("host:port"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "hub-init",
+        "--address",
+        "10.60.0.1/24",
+        "--endpoint",
+        "hub.example.com:0",
+    ]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("must not be 0"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "hub-init",
+        "--address",
+        "10.60.0.1/24",
+        "--endpoint",
+        "hub.example.com:notaport",
+    ]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("port must be a number"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "hub-init",
+        "--address",
+        "10.60.0.1",
+        "--endpoint",
+        "hub.example.com:51820",
+    ]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("prefix length"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "hub-init",
+        "--listen-port",
+        "0",
+        "--address",
+        "10.60.0.1/24",
+        "--endpoint",
+        "hub.example.com:51820",
+    ]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("listen-port must not be 0"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "hub-add-peer",
+        "--name",
+        "",
+        "--pubkey",
+        CLIENT_PUB,
+        "--address",
+        "10.60.0.2",
+    ]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("must not be empty"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "hub-add-peer",
+        "--name",
+        "x",
+        "--pubkey",
+        "not-a-key",
+        "--address",
+        "10.60.0.2",
+    ]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("not a valid WireGuard public key"),
+        "{stderr}"
+    );
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "hub-add-peer",
+        "--name",
+        "x",
+        "--pubkey",
+        CLIENT_PUB,
+        "--address",
+        "10.60.0.2/32",
+    ]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("plain IP"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "client-init",
+        "--address",
+        "10.60.0.2/24",
+        "--endpoint",
+        "hub.example.com:51820",
+        "--hub-pubkey",
+        "bogus",
+        "--allowed-ips",
+        "10.60.0.0/24",
+    ]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("hub-pubkey is not a valid"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "client-init",
+        "--address",
+        "10.60.0.2/24",
+        "--endpoint",
+        "hub.example.com:51820",
+        "--hub-pubkey",
+        HUB_PUB,
+        "--allowed-ips",
+        " ",
+    ]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("allowed-ips must not be empty"), "{stderr}");
+}
+
+#[test]
+fn wireguard_commands_require_state() {
+    let env = setup(HUB_PRIV, HUB_PUB, HUB_DUMP);
+
+    let (code, _, stderr) = env.run(&["wg", "up"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("no wireguard state"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&["wg", "status", "--format", "json"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("no wireguard state"), "{stderr}");
 }

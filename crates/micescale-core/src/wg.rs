@@ -155,6 +155,62 @@ mod tests {
         assert!(is_wg_key(CLIENT_PUBLIC));
         assert!(!is_wg_key("short"));
         assert!(!is_wg_key("not base64 !!! !!! !!! !!! !!! !!! !!! !!! 12"));
+        assert!(!is_wg_key("eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eA"));
+        assert!(!is_wg_key("eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg==x"));
+    }
+
+    #[test]
+    fn parses_multiple_interfaces_and_empty_endpoints() {
+        let source = concat!(
+            "lmice0\tAHU9KEY\tK3k=\t51820\toff\n",
+            "lmice0\tPEERKEY\t\t\t10.60.0.2/32\t0\t0\t0\t25\n",
+            "wg0\tOTHERKEY\tYWJj\t12345\toff\n",
+        );
+        let dump = parse_dump(source).expect("dump parses");
+        assert_eq!(dump.interfaces.len(), 2);
+        assert_eq!(dump.interfaces[1].interface, "wg0");
+        assert_eq!(dump.interfaces[1].listen_port, 12345);
+        assert_eq!(dump.peers.len(), 1);
+        assert_eq!(dump.peers[0].endpoint, None);
+        assert_eq!(dump.peers[0].latest_handshake, 0);
+    }
+
+    #[test]
+    fn rejects_malformed_dump() {
+        assert_eq!(parse_dump("just-an-interface-name"), None);
+        assert_eq!(
+            parse_dump("lmice0\tK3k=\t51820\toff\nlmice0\tSHORT\t\t1.2.3.4/32\t0\t0\n"),
+            None
+        );
+        assert_eq!(parse_dump(""), Some(WgDump::default()));
+    }
+
+    #[test]
+    fn find_peer_matches_by_name() {
+        let hub = HubState {
+            interface: DEFAULT_INTERFACE.into(),
+            listen_port: 51820,
+            address: "10.60.0.1/24".into(),
+            endpoint: "hub.example.com:51820".into(),
+            pubkey: HUB_PUBLIC.into(),
+            peers: vec![
+                HubPeer {
+                    name: "laptop".into(),
+                    pubkey: CLIENT_PUBLIC.into(),
+                    address: "10.60.0.2".into(),
+                },
+                HubPeer {
+                    name: "server".into(),
+                    pubkey: "c2Vjb25kLXB1YmxpYy1rZXktc2Vjb25kLXB1YmxpYy0=".into(),
+                    address: "10.60.0.3".into(),
+                },
+            ],
+        };
+        assert_eq!(
+            hub.find_peer("laptop").map(|peer| peer.address.as_str()),
+            Some("10.60.0.2")
+        );
+        assert_eq!(hub.find_peer("ghost"), None);
     }
 
     #[test]
