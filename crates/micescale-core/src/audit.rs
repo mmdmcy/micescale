@@ -11,7 +11,8 @@ pub struct AuditEvent {
     pub ts: u64,
     pub event: String,
     pub carrier: String,
-    pub control_server: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_server: Option<String>,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_name: Option<String>,
@@ -75,7 +76,7 @@ mod tests {
             ts,
             event: event.into(),
             carrier: "headscale".into(),
-            control_server: "https://headscale.example.com".into(),
+            control_server: Some("https://headscale.example.com".into()),
             status: "ok".into(),
             node_name: Some("smoke-node".into()),
             detail: None,

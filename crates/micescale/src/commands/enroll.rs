@@ -12,14 +12,20 @@ pub fn run(
     node_name: Option<&str>,
     carrier: &str,
 ) -> Result<(), AppError> {
+    if carrier == "wireguard" {
+        return Err(AppError::Usage(
+            "the wireguard carrier has no coordination server; run `micescale wg client-init` instead"
+                .into(),
+        ));
+    }
     if authkey.trim().is_empty() {
         return Err(AppError::Usage(
             "an auth key is required via --authkey or MICESCALE_AUTHKEY".into(),
         ));
     }
     let config = Config::new(
-        server.to_string(),
         carrier.to_string(),
+        Some(server.to_string()),
         node_name.map(str::to_string),
     );
     config::validate(&config)?;

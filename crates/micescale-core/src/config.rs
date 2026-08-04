@@ -11,8 +11,9 @@ pub const SUPPORTED_CARRIERS: [&str; 2] = ["headscale", "wireguard"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
-    pub control_server: String,
     pub carrier: String,
+    #[serde(default)]
+    pub control_server: Option<String>,
     #[serde(default)]
     pub node_name: Option<String>,
     #[serde(default)]
@@ -20,10 +21,10 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new(control_server: String, carrier: String, node_name: Option<String>) -> Self {
+    pub fn new(carrier: String, control_server: Option<String>, node_name: Option<String>) -> Self {
         Self {
-            control_server,
             carrier,
+            control_server,
             node_name,
             audit_log: None,
         }
@@ -69,28 +70,33 @@ pub fn save(path: &Path, config: &Config) -> Result<(), CoreError> {
 }
 
 pub fn validate(config: &Config) -> Result<(), CoreError> {
-    let server = &config.control_server;
-    let https = server.strip_prefix("https://");
-    let loopback_http = server.strip_prefix("http://").is_some_and(|rest| {
-        let authority = rest.split('/').next().unwrap_or(rest);
-        let host = authority
-            .strip_prefix('[')
-            .and_then(|bracketed| bracketed.split_once(']'))
-            .map(|(host, _)| host)
-            .unwrap_or_else(|| authority.split(':').next().unwrap_or(authority));
-        host == "localhost" || host == "127.0.0.1" || host == "::1" || host.starts_with("127.")
-    });
-    if https.is_none() && !loopback_http {
-        return Err(CoreError::Config(
-            "control_server must be https://, or http:// on loopback only".into(),
-        ));
-    }
     if !SUPPORTED_CARRIERS.contains(&config.carrier.as_str()) {
         return Err(CoreError::Config(format!(
             "unsupported carrier {:?}; supported: {}",
             config.carrier,
             SUPPORTED_CARRIERS.join(", ")
         )));
+    }
+    if config.carrier == "headscale" {
+        let server = config
+            .control_server
+            .as_deref()
+            .ok_or_else(|| CoreError::Config("headscale carrier requires control_server".into()))?;
+        let https = server.strip_prefix("https://");
+        let loopback_http = server.strip_prefix("http://").is_some_and(|rest| {
+            let authority = rest.split('/').next().unwrap_or(rest);
+            let host = authority
+                .strip_prefix('[')
+                .and_then(|bracketed| bracketed.split_once(']'))
+                .map(|(host, _)| host)
+                .unwrap_or_else(|| authority.split(':').next().unwrap_or(authority));
+            host == "localhost" || host == "127.0.0.1" || host == "::1" || host.starts_with("127.")
+        });
+        if https.is_none() && !loopback_http {
+            return Err(CoreError::Config(
+                "control_server must be https://, or http:// on loopback only".into(),
+            ));
+        }
     }
     if config.audit_log.as_deref().is_some_and(str::is_empty) {
         return Err(CoreError::Config("audit_log must not be empty".into()));
@@ -105,8 +111,8 @@ mod tests {
     #[test]
     fn round_trip_through_toml() {
         let config = Config::new(
-            "https://headscale.example.com".into(),
             "headscale".into(),
+            Some("https://headscale.example.com".into()),
             Some("lab-node".into()),
         );
         let rendered = toml::to_string_pretty(&config).unwrap();
@@ -117,8 +123,8 @@ mod tests {
     #[test]
     fn rejects_plain_http_remote_control_server() {
         let config = Config::new(
-            "http://control.example.com".into(),
             "headscale".into(),
+            Some("http://control.example.com".into()),
             None,
         );
         assert!(validate(&config).is_err());
@@ -131,14 +137,24 @@ mod tests {
             "http://localhost:8080",
             "http://[::1]:8080",
         ] {
-            let config = Config::new(server.into(), "headscale".into(), None);
+            let config = Config::new("headscale".into(), Some(server.into()), None);
             validate(&config).expect(server);
         }
     }
 
     #[test]
     fn rejects_unknown_carrier() {
-        let config = Config::new("https://headscale.example.com".into(), "magic".into(), None);
+        let config = Config::new(
+            "magic".into(),
+            Some("https://headscale.example.com".into()),
+            None,
+        );
         assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn wireguard_carrier_needs_no_control_server() {
+        let config = Config::new("wireguard".into(), None, None);
+        validate(&config).expect("wireguard carrier is valid without control_server");
     }
 }

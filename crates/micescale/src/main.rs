@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod error;
+mod process;
 mod tailscale;
 
 pub use error::AppError;

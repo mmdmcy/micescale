@@ -26,7 +26,7 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Join a self-hosted tailnet with a pre-auth key.
+    /// Join a self-hosted tailnet with a pre-auth key (headscale carrier).
     Enroll {
         /// Headscale or WireGuard control server URL.
         #[arg(long)]
@@ -40,6 +40,11 @@ pub enum Command {
         /// Carrier profile to configure.
         #[arg(long, default_value = "headscale", value_parser = clap::builder::PossibleValuesParser::new(SUPPORTED_CARRIERS))]
         carrier: String,
+    },
+    /// Operate a plain WireGuard mesh with no coordination server.
+    Wg {
+        #[command(subcommand)]
+        action: WgAction,
     },
     /// Report tailnet membership and LinuxMice posture.
     Status {
@@ -60,6 +65,67 @@ pub enum Command {
     Audit {
         #[command(subcommand)]
         action: AuditAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WgAction {
+    /// Initialize the hub (coordination-free server) keypair and config.
+    HubInit {
+        #[arg(long, default_value_t = micescale_core::wg::DEFAULT_PORT)]
+        listen_port: u16,
+        /// Hub address with prefix length, e.g. 10.60.0.1/24.
+        #[arg(long)]
+        address: String,
+        /// Public endpoint reachable by clients, e.g. hub.example.com:51820.
+        #[arg(long)]
+        endpoint: String,
+        #[arg(long, default_value = micescale_core::wg::DEFAULT_INTERFACE)]
+        interface: String,
+    },
+    /// Register a client peer on the hub.
+    HubAddPeer {
+        #[arg(long)]
+        name: String,
+        /// Client public key (from `micescale wg client-init`).
+        #[arg(long)]
+        pubkey: String,
+        /// Client address, e.g. 10.60.0.2.
+        #[arg(long)]
+        address: String,
+    },
+    /// Remove a client peer from the hub.
+    HubRemovePeer {
+        #[arg(long)]
+        name: String,
+    },
+    /// Re-render the hub config from the peer registry.
+    HubRender,
+    /// Generate a client keypair and config for a hub.
+    ClientInit {
+        /// Client address with prefix length, e.g. 10.60.0.2/24.
+        #[arg(long)]
+        address: String,
+        /// Hub public endpoint, e.g. hub.example.com:51820.
+        #[arg(long)]
+        endpoint: String,
+        /// Hub public key (from `micescale wg hub-init`).
+        #[arg(long)]
+        hub_pubkey: String,
+        /// Routes to send over the tunnel, e.g. 10.60.0.0/24.
+        #[arg(long)]
+        allowed_ips: String,
+        #[arg(long, default_value = micescale_core::wg::DEFAULT_INTERFACE)]
+        interface: String,
+    },
+    /// Bring the interface up (requires root).
+    Up,
+    /// Bring the interface down (requires root).
+    Down,
+    /// Report wireguard mesh status.
+    Status {
+        #[arg(long, default_value = "text", value_parser = ["text", "json", "yaml"])]
+        format: String,
     },
 }
 

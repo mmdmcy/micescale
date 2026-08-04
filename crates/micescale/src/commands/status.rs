@@ -31,12 +31,19 @@ pub fn run(format: &str) -> Result<(), AppError> {
     let path = config::default_path();
     let Some(config) = config::load(&path)? else {
         return Err(AppError::Operational(format!(
-            "no config at {}; run `micescale enroll` first",
+            "no config at {}; run `micescale enroll` or `micescale wg client-init` first",
             path.display()
         )));
     };
+    if config.carrier == "wireguard" {
+        return crate::commands::wg::status(format);
+    }
     let raw = tailscale::status_json()?;
-    let report = build(&config.control_server, &config.carrier, &raw);
+    let report = build(
+        config.control_server.as_deref().unwrap_or("(unknown)"),
+        &config.carrier,
+        &raw,
+    );
     match format {
         "json" => println!(
             "{}",

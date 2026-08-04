@@ -23,7 +23,7 @@ pub fn tail(limit: usize, format: &str) -> Result<(), AppError> {
                     event.ts,
                     event.event,
                     event.status,
-                    event.control_server,
+                    event.control_server.as_deref().unwrap_or("-"),
                     event.node_name.as_deref().unwrap_or("-")
                 );
             }

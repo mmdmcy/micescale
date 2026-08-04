@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
-use std::process::Command;
 
 use serde::Deserialize;
 
 use micescale_core::paths::TAILSCALE_BIN_ENV;
 
 use crate::AppError;
+use crate::process;
 
 pub fn binary() -> Result<String, AppError> {
     if let Some(custom) = env::var_os(TAILSCALE_BIN_ENV).filter(|value| !value.is_empty()) {
@@ -22,41 +22,6 @@ pub fn binary() -> Result<String, AppError> {
         return Ok(path.to_string_lossy().into_owned());
     }
     Ok("tailscale".into())
-}
-
-pub fn run(args: &[&str]) -> Result<Output, AppError> {
-    let binary = binary()?;
-    let output = Command::new(&binary).args(args).output().map_err(|error| {
-        AppError::Operational(format!(
-            "cannot execute {binary}: {error}; is the tailscale client installed?"
-        ))
-    })?;
-    Ok(Output {
-        status: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
-}
-
-pub struct Output {
-    pub status: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-impl Output {
-    pub fn ok(&self, context: &str) -> Result<(), AppError> {
-        if self.status == Some(0) {
-            Ok(())
-        } else {
-            let detail = if self.stderr.trim().is_empty() {
-                self.stdout.trim()
-            } else {
-                self.stderr.trim()
-            };
-            Err(AppError::Operational(format!("{context} failed: {detail}")))
-        }
-    }
 }
 
 pub fn up(server: &str, node_name: Option<&str>, authkey: &str) -> Result<(), AppError> {
@@ -74,15 +39,15 @@ pub fn up(server: &str, node_name: Option<&str>, authkey: &str) -> Result<(), Ap
         args.push("--hostname");
         args.push(name);
     }
-    run(&args)?.ok("tailscale up")
+    process::run(&binary()?, &args)?.ok("tailscale up")
 }
 
 pub fn logout() -> Result<(), AppError> {
-    run(&["logout"])?.ok("tailscale logout")
+    process::run(&binary()?, &["logout"])?.ok("tailscale logout")
 }
 
 pub fn status_json() -> Result<TailscaleStatus, AppError> {
-    let output = run(&["status", "--json"])?;
+    let output = process::run(&binary()?, &["status", "--json"])?;
     output.ok("tailscale status")?;
     let status = serde_json::from_str::<TailscaleStatus>(&output.stdout).map_err(|error| {
         AppError::Operational(format!("cannot parse tailscale status JSON: {error}"))

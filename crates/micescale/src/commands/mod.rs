@@ -5,8 +5,9 @@ pub mod doctor;
 pub mod enroll;
 pub mod leave;
 pub mod status;
+pub mod wg;
 
-use crate::cli::{AuditAction, CarrierAction, Cli, Command, ConfigAction};
+use crate::cli::{AuditAction, CarrierAction, Cli, Command, ConfigAction, WgAction};
 pub use crate::error::AppError;
 
 pub fn run(cli: Cli) -> Result<(), AppError> {
@@ -28,6 +29,31 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
             node_name,
             carrier,
         } => enroll::run(&server, &authkey, node_name.as_deref(), &carrier),
+        Command::Wg { action } => match action {
+            WgAction::HubInit {
+                listen_port,
+                address,
+                endpoint,
+                interface,
+            } => wg::hub_init(listen_port, &address, &endpoint, &interface),
+            WgAction::HubAddPeer {
+                name,
+                pubkey,
+                address,
+            } => wg::hub_add_peer(&name, &pubkey, &address),
+            WgAction::HubRemovePeer { name } => wg::hub_remove_peer(&name),
+            WgAction::HubRender => wg::hub_render(),
+            WgAction::ClientInit {
+                address,
+                endpoint,
+                hub_pubkey,
+                allowed_ips,
+                interface,
+            } => wg::client_init(&address, &endpoint, &hub_pubkey, &allowed_ips, &interface),
+            WgAction::Up => wg::up(),
+            WgAction::Down => wg::down(),
+            WgAction::Status { format } => wg::status(&format),
+        },
         Command::Status { format } => status::run(&format),
         Command::Doctor { peer, format } => doctor::run(peer.as_deref(), &format),
         Command::Leave => leave::run(),

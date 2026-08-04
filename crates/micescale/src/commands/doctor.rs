@@ -8,11 +8,28 @@ pub fn run(peer: Option<&str>, format: &str) -> Result<(), AppError> {
     let path = config::default_path();
     let config = config::load(&path)?.ok_or_else(|| {
         AppError::Operational(format!(
-            "no config at {}; run `micescale enroll` first",
+            "no config at {}; run `micescale enroll` or `micescale wg client-init` first",
             path.display()
         ))
     })?;
 
+    if config.carrier == "wireguard" {
+        if peer.is_some() {
+            return Err(AppError::Usage(
+                "the wireguard carrier does not support --peer; use `micescale wg status`".into(),
+            ));
+        }
+        let report = crate::commands::wg::top_level_doctor()?;
+        emit(&report, format)?;
+        if report.healthy {
+            return Ok(());
+        }
+        return Err(AppError::Operational(
+            "one or more health checks failed".into(),
+        ));
+    }
+
+    let control_server = config.control_server.as_deref().unwrap_or("(unknown)");
     let mut report = HealthReport::new(config.carrier.clone());
 
     report.add(HealthCheck {
@@ -43,7 +60,7 @@ pub fn run(peer: Option<&str>, format: &str) -> Result<(), AppError> {
         }
     };
 
-    report.add(control_server_check(&config.control_server));
+    report.add(control_server_check(control_server));
 
     let wireguard_ok = std::fs::metadata("/sys/module/wireguard").is_ok();
     report.add(HealthCheck {
@@ -91,6 +108,18 @@ pub fn run(peer: Option<&str>, format: &str) -> Result<(), AppError> {
         }
     }
 
+    emit(&report, format)?;
+
+    if report.healthy {
+        Ok(())
+    } else {
+        Err(AppError::Operational(
+            "one or more health checks failed".into(),
+        ))
+    }
+}
+
+fn emit(report: &HealthReport, format: &str) -> Result<(), AppError> {
     match format {
         "json" => println!(
             "{}",
@@ -108,14 +137,7 @@ pub fn run(peer: Option<&str>, format: &str) -> Result<(), AppError> {
             }
         }
     }
-
-    if report.healthy {
-        Ok(())
-    } else {
-        Err(AppError::Operational(
-            "one or more health checks failed".into(),
-        ))
-    }
+    Ok(())
 }
 
 fn control_server_check(server: &str) -> HealthCheck {

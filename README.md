@@ -1,15 +1,16 @@
 # MiceScale
 
 MiceScale is a standalone carrier component for the LinuxMice private transport
-layer: it operationalizes a self-hosted Headscale control server and plain
-WireGuard so a fleet can run a Tailscale-like tailnet without depending on
-Tailscale's cloud coordination. Tailscale becomes an optional carrier, never
-the trust root.
+layer: it operationalizes plain WireGuard with no coordination server and, as
+an alternative, a self-hosted Headscale control server. Either way a fleet runs
+a Tailscale-like tailnet without depending on Tailscale's cloud coordination.
+Tailscale becomes an optional carrier, never the trust root.
 
 It is a deployment and operations layer, not a reimplementation: the standard
-open-source `tailscale` client connects to your own Headscale server, WireGuard
-is the carrier protocol, and MiceScale owns configuration, enrollment, health
-checks, audit events, and the LinuxMice component contract around them.
+open-source `tailscale` client can connect to your own Headscale server, or
+MiceScale drives plain `wg`/`wg-quick` directly with zero Tailscale code.
+MiceScale owns configuration, enrollment, health checks, audit events, and the
+LinuxMice component contract around them.
 
 MiceScale follows the LinuxMice transport doctrine
 (linuxmice decision 0012): network reachability is never authorization.
@@ -32,6 +33,32 @@ server without changing LinuxMice service authorization. MiceScale is the
 operational layer that makes the self-hosted option a first-class citizen.
 
 ## Quick start
+
+### WireGuard carrier (no coordination server, no Tailscale code)
+
+Hub host (one VPS):
+
+```bash
+micescale wg hub-init --address 10.60.0.1/24 --endpoint hub.example.com:51820
+sudo wg-quick up ~/.local/state/micescale/wireguard/hub.conf
+```
+
+Each device:
+
+```bash
+micescale wg client-init \
+  --address 10.60.0.2/24 \
+  --endpoint hub.example.com:51820 \
+  --hub-pubkey <hub-public-key> \
+  --allowed-ips 10.60.0.0/24
+sudo wg-quick up ~/.local/state/micescale/wireguard/client.conf
+micescale wg status
+```
+
+The hub operator registers each client with `micescale wg hub-add-peer`.
+Peer keys are exchanged out-of-band; see [docs/wireguard-carrier.md](docs/wireguard-carrier.md).
+
+### Headscale carrier (coordinated tailnet)
 
 Server (one host):
 
@@ -70,6 +97,13 @@ micescale carrier policy [--format json|yaml]
 micescale carrier profiles [--format json|yaml]
 micescale config show [--format json|yaml]
 micescale enroll --server <url> --authkey <key> [--node-name <name>] [--carrier headscale|wireguard]
+micescale wg hub-init --address <addr/prefix> --endpoint <host:port> [--listen-port N]
+micescale wg hub-add-peer --name <name> --pubkey <key> --address <addr>
+micescale wg hub-remove-peer --name <name>
+micescale wg hub-render
+micescale wg client-init --address <addr/prefix> --endpoint <host:port> --hub-pubkey <key> --allowed-ips <prefix>
+micescale wg up|down
+micescale wg status [--format json|yaml]
 micescale status [--format json|yaml]
 micescale doctor [--peer <name>] [--format json|yaml]
 micescale leave
@@ -78,7 +112,8 @@ micescale audit tail [--limit N] [--format json|yaml]
 
 All output supports structured JSON/YAML. Secrets are never stored in config,
 audit logs, or tracked files; auth keys exist only in the process environment
-and the underlying `tailscale` call.
+and the underlying `tailscale` call, and WireGuard private keys only in 0600
+`*.key`/`*.conf` files under the WireGuard state directory.
 
 ## Configuration
 
@@ -94,6 +129,9 @@ Environment overrides:
 | `MICESCALE_AUDIT_LOG` | Audit log path |
 | `MICESCALE_AUTHKEY` | Pre-auth key for `enroll` (never persisted) |
 | `MICESCALE_TAILSCALE_BIN` | `tailscale` binary path (default: `tailscale`) |
+| `MICESCALE_WG_BIN` | `wg` binary path (default: `wg`) |
+| `MICESCALE_WGQUICK_BIN` | `wg-quick` binary path (default: `wg-quick`) |
+| `MICESCALE_WG_DIR` | WireGuard state directory (default: `~/.local/state/micescale/wireguard`) |
 
 ## How it fits
 
@@ -101,7 +139,7 @@ Environment overrides:
 browser / service
   -> LinuxMice mTLS / encrypted envelope   (identity, policy, audit)
   -> MiceScale tailnet                     (reachability only)
-  -> Headscale coordination + WireGuard     (carrier)
+  -> WireGuard carrier                     (no coordinator, or Headscale)
 ```
 
 Reachability is a carrier concern. Authorization stays LinuxMice-owned.
@@ -112,7 +150,8 @@ Reachability is a carrier concern. Authorization stays LinuxMice-owned.
 - `deploy/headscale/` — Headscale server profile: config template, systemd
   unit, DERP example, firewall and backup/rotation procedures.
 - `manifests/` — LinuxMice component contract (decision 0017).
-- `docs/` — architecture, operations, and migration documentation.
+- `docs/` — architecture, operations, and migration documentation, including
+  the coordination-free [WireGuard carrier](docs/wireguard-carrier.md).
 - `scripts/` — deterministic local smoke checks.
 
 ## Development

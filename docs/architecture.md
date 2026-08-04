@@ -38,6 +38,8 @@ documented alternative to Tailscale cloud.
 
 ## Runtime shape
 
+Headscale carrier:
+
 ```text
 device
   tailscale client (WireGuard)
@@ -51,10 +53,26 @@ The control server holds the node registry and pre-auth keys. The clients hold
 WireGuard identities issued by that control server. Nothing on this path
 depends on a third-party coordinator.
 
+WireGuard carrier (coordination-free, no Tailscale code):
+
+```text
+hub (micescale wg hub-init, hub.conf + hub.key)
+  <- client A: micescale wg client-init, client.conf
+  <- client B
+  micescale wg hub-add-peer / status / up / down / leave
+```
+
+There is no registry, no coordinator, and no pre-auth key. The hub holds the
+peer list in `hub.json` and re-renders `hub.conf`; clients hold only their own
+config. Peer keys travel out-of-band. See
+[docs/wireguard-carrier.md](wireguard-carrier.md) for the full workflow.
+
 ## Trust model
 
-- Pre-auth keys are fleet onboarding credentials; short-lived, revocable,
-  never persisted by MiceScale.
+- Pre-auth keys are fleet onboarding credentials (headscale carrier only);
+  short-lived, revocable, never persisted by MiceScale.
+- WireGuard private keys (either carrier) live only in 0600 `*.key`/`*.conf`
+  files; they are never written to JSON state or audit events.
 - The `noise_private.key` and the database are control-plane state; their
   backup is the operator's responsibility (see `deploy/headscale/`).
 - The tailnet is a reachability fabric. LinuxMice mTLS, policy, and encrypted
