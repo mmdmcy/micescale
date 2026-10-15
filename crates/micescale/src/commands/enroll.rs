@@ -11,6 +11,7 @@ pub fn run(
     authkey: &str,
     node_name: Option<&str>,
     carrier: &str,
+    force_reauth: bool,
 ) -> Result<(), AppError> {
     if carrier == "wireguard" {
         return Err(AppError::Usage(
@@ -30,7 +31,7 @@ pub fn run(
     );
     config::validate(&config)?;
 
-    tailscale::up(server, node_name, authkey)?;
+    tailscale::up(server, node_name, authkey, force_reauth)?;
 
     let path = config::default_path();
     config::save(&path, &config)?;

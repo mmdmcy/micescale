@@ -116,7 +116,7 @@ fn hub_lifecycle_without_secrets_in_registry() {
     let (code, _, stderr) = env.run(&["wg", "hub-render"]);
     assert_eq!(code, 0, "hub-render failed: {stderr}");
 
-    let hub_conf = env.file("hub.conf");
+    let hub_conf = env.file("lmice0.conf");
     assert!(
         hub_conf.contains(HUB_PRIV),
         "hub.conf must carry the private key"
@@ -176,7 +176,7 @@ fn client_lifecycle_and_leave() {
         "{stdout}"
     );
 
-    let client_conf = env.file("client.conf");
+    let client_conf = env.file("lmice0.conf");
     assert!(client_conf.contains(CLIENT_PRIV));
     assert!(client_conf.contains("PersistentKeepalive = 25"));
 
@@ -312,7 +312,7 @@ fn hub_remove_peer_and_duplicate_rejection() {
     let (code, _, stderr) = env.run(&["wg", "hub-remove-peer", "--name", "laptop"]);
     assert_eq!(code, 0, "hub-remove-peer failed: {stderr}");
 
-    let hub_conf = env.file("hub.conf");
+    let hub_conf = env.file("lmice0.conf");
     assert!(
         !hub_conf.contains(CLIENT_PUB),
         "removed peer must leave hub.conf"
@@ -473,4 +473,187 @@ fn wireguard_commands_require_state() {
     let (code, _, stderr) = env.run(&["wg", "status", "--format", "json"]);
     assert_eq!(code, 1);
     assert!(stderr.contains("no wireguard state"), "{stderr}");
+}
+
+const HUB_INIT: &[&str] = &[
+    "wg",
+    "hub-init",
+    "--address",
+    "10.60.0.1/24",
+    "--endpoint",
+    "hub.example.com:51820",
+];
+
+fn add_peer(env: &Env, name: &str, pubkey: &str, address: &str) -> (i32, String, String) {
+    env.run(&[
+        "wg",
+        "hub-add-peer",
+        "--name",
+        name,
+        "--pubkey",
+        pubkey,
+        "--address",
+        address,
+    ])
+}
+
+#[test]
+fn config_file_is_named_after_the_interface() {
+    let dump = "wg7\tDUMPPUB\tK3k=\t51820\toff\n";
+    let env = setup(HUB_PRIV, HUB_PUB, dump);
+    let mut args = HUB_INIT.to_vec();
+    args.extend(["--interface", "wg7"]);
+    let (code, _, stderr) = env.run(&args);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(env.file("wg7.conf").contains("ListenPort = 51820"));
+    assert!(!env.root.join("wg").join("hub.conf").exists());
+
+    let (code, _, stderr) = env.run(&["wg", "up"]);
+    assert_eq!(code, 0, "{stderr}");
+    let log = fs::read_to_string(env.root.join("wg-quick.log")).unwrap();
+    let conf = env.root.join("wg").join("wg7.conf");
+    assert!(
+        log.contains(&format!("up {}", conf.display())),
+        "wg-quick must get <iface>.conf so its interface is wg7: {log}"
+    );
+
+    // status/doctor look the interface up by the same name wg-quick used.
+    let (code, stdout, _) = env.run(&["wg", "status", "--format", "json"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("\"interface\": \"wg7\""), "{stdout}");
+    assert!(stdout.contains("\"running\": true"), "{stdout}");
+    let (code, stdout, _) = env.run(&["doctor", "--format", "json"]);
+    assert_eq!(code, 0, "{stdout}");
+
+    let mut args = HUB_INIT.to_vec();
+    args.extend(["--interface", "../evil", "--force"]);
+    let (code, _, stderr) = env.run(&args);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("interface must be"), "{stderr}");
+}
+
+#[test]
+fn hub_add_peer_prints_a_working_syncconf_and_forwards() {
+    let env = setup(HUB_PRIV, HUB_PUB, HUB_DUMP);
+    assert_eq!(env.run(HUB_INIT).0, 0);
+    let (code, stdout, stderr) = add_peer(&env, "laptop", CLIENT_PUB, "10.60.0.2");
+    assert_eq!(code, 0, "{stderr}");
+    let conf = env.root.join("wg").join("lmice0.conf");
+    assert!(
+        stdout.contains(&format!(
+            "sudo bash -c 'wg syncconf lmice0 <(wg-quick strip {})'",
+            conf.display()
+        )),
+        "{stdout}"
+    );
+    let hub_conf = env.file("lmice0.conf");
+    assert!(
+        hub_conf.contains(
+            "PostUp = sysctl -w net.ipv4.ip_forward=1; iptables -I FORWARD -i %i -o %i -j ACCEPT"
+        ),
+        "{hub_conf}"
+    );
+    assert!(
+        hub_conf.contains("PostDown = iptables -D FORWARD -i %i -o %i -j ACCEPT"),
+        "{hub_conf}"
+    );
+    let mode = fs::metadata(&conf).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
+fn hub_init_refuses_to_clobber_without_force() {
+    let env = setup(HUB_PRIV, HUB_PUB, HUB_DUMP);
+    assert_eq!(env.run(HUB_INIT).0, 0);
+    assert_eq!(add_peer(&env, "laptop", CLIENT_PUB, "10.60.0.2").0, 0);
+
+    let (code, _, stderr) = env.run(HUB_INIT);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("--force"), "{stderr}");
+    assert!(
+        env.file("hub.json").contains(CLIENT_PUB),
+        "peers must survive"
+    );
+
+    let mut args = HUB_INIT.to_vec();
+    args.push("--force");
+    let (code, stdout, stderr) = env.run(&args);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("backed up"), "{stdout}");
+    assert!(!env.file("hub.json").contains(CLIENT_PUB));
+
+    let backups: Vec<String> = fs::read_dir(env.root.join("wg"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".bak-"))
+        .collect();
+    assert_eq!(backups.len(), 3, "{backups:?}");
+    for prefix in ["hub.json.bak-", "hub.key.bak-", "lmice0.conf.bak-"] {
+        let name = backups
+            .iter()
+            .find(|name| name.starts_with(prefix))
+            .unwrap();
+        let path = env.root.join("wg").join(name);
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{name}");
+        if prefix == "hub.json.bak-" {
+            assert!(fs::read_to_string(&path).unwrap().contains(CLIENT_PUB));
+        }
+    }
+}
+
+#[test]
+fn peer_addresses_and_keys_are_validated() {
+    let env = setup(HUB_PRIV, HUB_PUB, HUB_DUMP);
+    assert_eq!(env.run(HUB_INIT).0, 0);
+    assert_eq!(add_peer(&env, "laptop", CLIENT_PUB, "10.60.0.2").0, 0);
+
+    for (address, expected) in [
+        ("999.1.1.1", "not a valid IP address"),
+        ("10.61.0.2", "not a host address in the hub subnet"),
+        ("10.60.0.255", "not a host address in the hub subnet"),
+        ("10.60.0.0", "not a host address in the hub subnet"),
+        ("fd00::2", "not a host address in the hub subnet"),
+        ("10.60.0.1", "hub's own address"),
+    ] {
+        let (code, _, stderr) = add_peer(&env, "x", SECOND_PUB, address);
+        assert_eq!(code, 2, "{address}: {stderr}");
+        assert!(stderr.contains(expected), "{address}: {stderr}");
+    }
+
+    let (code, _, stderr) = add_peer(&env, "x", HUB_PUB, "10.60.0.3");
+    assert_eq!(code, 2);
+    assert!(stderr.contains("hub's own public key"), "{stderr}");
+
+    // 43 chars, no padding: decodes to 32 bytes in some tools, but not wg's form.
+    let (code, _, stderr) = add_peer(&env, "x", &SECOND_PUB[..43], "10.60.0.3");
+    assert_eq!(code, 2);
+    assert!(stderr.contains("not a valid WireGuard"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "client-init",
+        "--address",
+        "10.60.0.2/24",
+        "--endpoint",
+        "hub.example.com:51820",
+        "--hub-pubkey",
+        HUB_PUB,
+        "--allowed-ips",
+        "10.60.0.0/24, 999.0.0.0/8",
+    ]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("999.0.0.0/8"), "{stderr}");
+
+    let (code, _, stderr) = env.run(&[
+        "wg",
+        "hub-init",
+        "--address",
+        "999.60.0.1/24",
+        "--endpoint",
+        "hub.example.com:51820",
+        "--force",
+    ]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("not a valid address/prefix"), "{stderr}");
 }

@@ -1,13 +1,15 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::net::IpAddr;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use micescale_core::config as mconfig;
-use micescale_core::wg::{self, ClientState, HubPeer, HubState, WgDump};
+use micescale_core::wg::{self, Cidr, ClientState, HubPeer, HubState, WgDump};
 
 use crate::AppError;
 use crate::commands::enroll::append_event;
+use crate::files::write_private;
 use crate::process;
 
 pub const WG_BIN_ENV: &str = "MICESCALE_WG_BIN";
@@ -39,18 +41,11 @@ fn state_path(file: &str) -> std::path::PathBuf {
     wg_dir().join(file)
 }
 
-fn write_private(path: &Path, content: &str) -> Result<(), AppError> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::write(path, content).map_err(|error| {
-        AppError::Operational(format!("cannot write {}: {error}", path.display()))
-    })?;
-    let mut permissions = fs::metadata(path)
-        .map_err(|error| AppError::Operational(format!("cannot stat {}: {error}", path.display())))?
-        .permissions();
-    permissions.set_mode(0o600);
-    fs::set_permissions(path, permissions).map_err(|error| {
-        AppError::Operational(format!("cannot lock down {}: {error}", path.display()))
-    })
+/// The wg-quick config for `interface`. wg-quick names the interface after
+/// the file stem, so the file must be `<interface>.conf` for status/doctor
+/// (which look the interface up by name) to agree with what `up` creates.
+fn conf_path(interface: &str) -> PathBuf {
+    state_path(&format!("{interface}.conf"))
 }
 
 fn genkey() -> Result<String, AppError> {
@@ -97,17 +92,59 @@ fn validate_endpoint(endpoint: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_address(address: &str, allow_subnet: bool) -> Result<(), AppError> {
-    let has_mask = address.contains('/');
-    if allow_subnet && !has_mask {
+fn validate_interface(interface: &str) -> Result<(), AppError> {
+    if !wg::is_interface_name(interface) {
+        return Err(AppError::Usage(
+            "interface must be 1-15 characters of a-z, A-Z, 0-9, _=+.-".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Parse an address with prefix length (hub/client tunnel address).
+fn parse_cidr(address: &str) -> Result<Cidr, AppError> {
+    if !address.contains('/') {
         return Err(AppError::Usage(
             "address must include a prefix length, for example 10.60.0.1/24".into(),
         ));
     }
-    if !allow_subnet && has_mask {
+    let cidr = Cidr::parse(address)
+        .ok_or_else(|| AppError::Usage(format!("{address} is not a valid address/prefix")))?;
+    if cidr.is_reserved(cidr.addr) {
+        return Err(AppError::Usage(format!(
+            "{address} is a network or broadcast address, not a host address"
+        )));
+    }
+    Ok(cidr)
+}
+
+/// Parse a peer address: a plain host IP (subnet checks need the hub state).
+fn parse_peer_ip(address: &str) -> Result<IpAddr, AppError> {
+    if address.contains('/') {
         return Err(AppError::Usage(
             "peer address must be a plain IP, for example 10.60.0.2".into(),
         ));
+    }
+    address
+        .parse()
+        .map_err(|_| AppError::Usage(format!("{address} is not a valid IP address")))
+}
+
+/// A peer must be a host address inside the hub subnet, other than the hub's.
+fn check_peer_in_subnet(ip: IpAddr, hub: &HubState) -> Result<(), AppError> {
+    let subnet = Cidr::parse(&hub.address).ok_or_else(|| {
+        AppError::Operational(format!("hub state has an invalid address {}", hub.address))
+    })?;
+    if !subnet.contains(ip) || subnet.is_reserved(ip) {
+        return Err(AppError::Usage(format!(
+            "peer address {ip} is not a host address in the hub subnet {}",
+            hub.address
+        )));
+    }
+    if ip == subnet.addr {
+        return Err(AppError::Usage(format!(
+            "peer address {ip} is the hub's own address"
+        )));
     }
     Ok(())
 }
@@ -172,7 +209,36 @@ fn render_hub_config() -> Result<(), AppError> {
             "hub.key does not contain a valid WireGuard key".into(),
         ));
     }
-    write_private(&state_path("hub.conf"), &state.render_config(private))
+    write_private(&conf_path(&state.interface), &state.render_config(private))
+}
+
+/// Copy existing hub files to `<file>.bak-<unix-seconds>` (0600) so a forced
+/// re-init never loses the old key or peer registry.
+fn backup_hub_state() -> Result<Vec<PathBuf>, AppError> {
+    let mut files = vec![state_path("hub.json"), state_path("hub.key")];
+    if let Ok(state) = load_hub_state() {
+        files.push(conf_path(&state.interface));
+    }
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_secs();
+    let mut written = Vec::new();
+    for path in files.into_iter().filter(|path| path.exists()) {
+        let backup = PathBuf::from(format!("{}.bak-{ts}", path.display()));
+        if backup.exists() {
+            return Err(AppError::Operational(format!(
+                "backup {} already exists; retry in a second",
+                backup.display()
+            )));
+        }
+        let content = fs::read_to_string(&path).map_err(|error| {
+            AppError::Operational(format!("cannot read {}: {error}", path.display()))
+        })?;
+        write_private(&backup, &content)?;
+        written.push(backup);
+    }
+    Ok(written)
 }
 
 pub fn hub_init(
@@ -180,15 +246,29 @@ pub fn hub_init(
     address: &str,
     endpoint: &str,
     interface: &str,
+    force: bool,
 ) -> Result<(), AppError> {
     validate_endpoint(endpoint)?;
-    validate_address(address, true)?;
+    parse_cidr(address)?;
+    validate_interface(interface)?;
     if listen_port == 0 {
         return Err(AppError::Usage("listen-port must not be 0".into()));
+    }
+    let existing = state_path("hub.json").exists() || state_path("hub.key").exists();
+    if existing && !force {
+        return Err(AppError::Operational(format!(
+            "hub state already exists in {}; re-running hub-init would replace the hub key and drop every peer. Pass --force to back it up and start over",
+            wg_dir().display()
+        )));
     }
     fs::create_dir_all(wg_dir()).map_err(|error| {
         AppError::Operational(format!("cannot create {}: {error}", wg_dir().display()))
     })?;
+    if existing {
+        for backup in backup_hub_state()? {
+            println!("backed up {}", backup.display());
+        }
+    }
     let private = genkey()?;
     let public = pubkey(&private)?;
     let state = HubState {
@@ -201,11 +281,16 @@ pub fn hub_init(
     };
     write_hub_state(&state)?;
     write_private(&state_path("hub.key"), &format!("{private}\n"))?;
-    write_private(&state_path("hub.conf"), &state.render_config(&private))?;
+    write_private(&conf_path(interface), &state.render_config(&private))?;
 
     let config = mconfig::Config::new("wireguard".into(), None, None);
     mconfig::save(&mconfig::default_path(), &config)?;
-    append_event(&config, "wg-hub-init", "ok", Some("hub keypair generated"))?;
+    let detail = if existing {
+        "hub keypair regenerated (--force); old state backed up"
+    } else {
+        "hub keypair generated"
+    };
+    append_event(&config, "wg-hub-init", "ok", Some(detail))?;
 
     println!("hub initialized");
     println!("  public key : {public}");
@@ -226,8 +311,15 @@ pub fn hub_add_peer(name: &str, pubkey: &str, address: &str) -> Result<(), AppEr
             "pubkey is not a valid WireGuard public key".into(),
         ));
     }
-    validate_address(address, false)?;
+    let ip = parse_peer_ip(address)?;
     let mut state = load_hub_state()?;
+    if pubkey == state.pubkey {
+        return Err(AppError::Usage(
+            "pubkey is the hub's own public key; pass the client's key".into(),
+        ));
+    }
+    check_peer_in_subnet(ip, &state)?;
+    let address = ip.to_string();
     if let Some(existing) = state.find_peer(name) {
         return Err(AppError::Operational(format!(
             "peer {name} already exists at {}",
@@ -237,7 +329,7 @@ pub fn hub_add_peer(name: &str, pubkey: &str, address: &str) -> Result<(), AppEr
     if state
         .peers
         .iter()
-        .any(|peer| peer.pubkey == pubkey || peer.address == address)
+        .any(|peer| peer.pubkey == pubkey || peer.address.parse::<IpAddr>().ok() == Some(ip))
     {
         return Err(AppError::Operational(
             "a peer with this public key or address already exists".into(),
@@ -246,7 +338,7 @@ pub fn hub_add_peer(name: &str, pubkey: &str, address: &str) -> Result<(), AppEr
     state.peers.push(HubPeer {
         name: name.to_string(),
         pubkey: pubkey.to_string(),
-        address: address.to_string(),
+        address: address.clone(),
     });
     write_hub_state(&state)?;
     render_hub_config()?;
@@ -255,11 +347,7 @@ pub fn hub_add_peer(name: &str, pubkey: &str, address: &str) -> Result<(), AppEr
     append_event(&config, "wg-hub-add-peer", "ok", Some(name))?;
 
     println!("peer {name} added at {address}");
-    println!(
-        "apply the change: sudo wg-quick up {0} (if down) or sudo wg syncconf {1} <(wg-quick strip {1})",
-        state_path("hub.conf").display(),
-        state.interface
-    );
+    print_apply_hint(&state.interface);
     Ok(())
 }
 
@@ -275,17 +363,34 @@ pub fn hub_remove_peer(name: &str) -> Result<(), AppError> {
     let config = mconfig::Config::new("wireguard".into(), None, None);
     append_event(&config, "wg-hub-remove-peer", "ok", Some(name))?;
     println!("peer {name} removed");
+    print_apply_hint(&state.interface);
     Ok(())
 }
 
 pub fn hub_render() -> Result<(), AppError> {
-    load_hub_state()?;
+    let state = load_hub_state()?;
     render_hub_config()?;
     println!(
         "hub config re-rendered at {}",
-        state_path("hub.conf").display()
+        conf_path(&state.interface).display()
     );
+    print_apply_hint(&state.interface);
     Ok(())
+}
+
+/// The commands that load a re-rendered hub config. Both wg-quick and wg need
+/// root, and wg-quick only finds bare interface names in /etc/wireguard, so
+/// strip is given the full path and the whole pipeline runs under one sudo.
+fn apply_hint(interface: &str) -> String {
+    let path = conf_path(interface);
+    format!(
+        "apply the change: sudo micescale wg up (if down), or live: sudo bash -c 'wg syncconf {interface} <(wg-quick strip {})'",
+        path.display()
+    )
+}
+
+fn print_apply_hint(interface: &str) {
+    println!("{}", apply_hint(interface));
 }
 
 pub fn client_init(
@@ -295,8 +400,9 @@ pub fn client_init(
     allowed_ips: &str,
     interface: &str,
 ) -> Result<(), AppError> {
-    validate_address(address, true)?;
+    parse_cidr(address)?;
     validate_endpoint(endpoint)?;
+    validate_interface(interface)?;
     if !wg::is_wg_key(hub_pubkey) {
         return Err(AppError::Usage(
             "hub-pubkey is not a valid WireGuard public key".into(),
@@ -304,6 +410,13 @@ pub fn client_init(
     }
     if allowed_ips.trim().is_empty() {
         return Err(AppError::Usage("allowed-ips must not be empty".into()));
+    }
+    for prefix in allowed_ips.split(',').map(str::trim) {
+        if Cidr::parse(prefix).is_none() {
+            return Err(AppError::Usage(format!(
+                "allowed-ips entry {prefix} is not a valid address/prefix"
+            )));
+        }
     }
     fs::create_dir_all(wg_dir()).map_err(|error| {
         AppError::Operational(format!("cannot create {}: {error}", wg_dir().display()))
@@ -328,7 +441,7 @@ pub fn client_init(
             state_path("client.json").display()
         ))
     })?;
-    write_private(&state_path("client.conf"), &state.render_config(&private))?;
+    write_private(&conf_path(interface), &state.render_config(&private))?;
 
     let config = mconfig::Config::new("wireguard".into(), None, None);
     mconfig::save(&mconfig::default_path(), &config)?;
@@ -350,11 +463,13 @@ pub fn client_init(
 fn active_config_path() -> Result<Option<(String, std::path::PathBuf)>, AppError> {
     if state_path("client.json").exists() {
         let state = load_client_state()?;
-        return Ok(Some((state.interface, state_path("client.conf"))));
+        let path = conf_path(&state.interface);
+        return Ok(Some((state.interface, path)));
     }
     if state_path("hub.json").exists() {
         let state = load_hub_state()?;
-        return Ok(Some((state.interface, state_path("hub.conf"))));
+        let path = conf_path(&state.interface);
+        return Ok(Some((state.interface, path)));
     }
     Ok(None)
 }
@@ -396,9 +511,14 @@ pub fn down() -> Result<(), AppError> {
 }
 
 pub fn leave() -> Result<(), AppError> {
+    let client_conf = load_client_state()
+        .ok()
+        .map(|state| conf_path(&state.interface));
     down()?;
-    for file in ["client.json", "client.conf"] {
-        let path = state_path(file);
+    for path in [Some(state_path("client.json")), client_conf]
+        .into_iter()
+        .flatten()
+    {
         if path.exists() {
             fs::remove_file(&path).map_err(|error| {
                 AppError::Operational(format!("cannot remove {}: {error}", path.display()))

@@ -40,6 +40,10 @@ pub enum Command {
         /// Carrier profile to configure.
         #[arg(long, default_value = "headscale", value_parser = clap::builder::PossibleValuesParser::new(SUPPORTED_CARRIERS))]
         carrier: String,
+        /// Drop the current login first (needed when moving off another
+        /// control server, e.g. Tailscale cloud).
+        #[arg(long)]
+        force_reauth: bool,
     },
     /// Operate a plain WireGuard mesh with no coordination server.
     Wg {
@@ -80,8 +84,13 @@ pub enum WgAction {
         /// Public endpoint reachable by clients, e.g. hub.example.com:51820.
         #[arg(long)]
         endpoint: String,
+        /// Interface name; the config is written as <interface>.conf.
         #[arg(long, default_value = micescale_core::wg::DEFAULT_INTERFACE)]
         interface: String,
+        /// Replace existing hub state (new key, no peers). The old files are
+        /// kept as timestamped .bak copies.
+        #[arg(long)]
+        force: bool,
     },
     /// Register a client peer on the hub.
     HubAddPeer {
@@ -115,6 +124,7 @@ pub enum WgAction {
         /// Routes to send over the tunnel, e.g. 10.60.0.0/24.
         #[arg(long)]
         allowed_ips: String,
+        /// Interface name; the config is written as <interface>.conf.
         #[arg(long, default_value = micescale_core::wg::DEFAULT_INTERFACE)]
         interface: String,
     },

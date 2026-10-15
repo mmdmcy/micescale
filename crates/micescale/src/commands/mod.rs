@@ -28,14 +28,22 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
             authkey,
             node_name,
             carrier,
-        } => enroll::run(&server, &authkey, node_name.as_deref(), &carrier),
+            force_reauth,
+        } => enroll::run(
+            &server,
+            &authkey,
+            node_name.as_deref(),
+            &carrier,
+            force_reauth,
+        ),
         Command::Wg { action } => match action {
             WgAction::HubInit {
                 listen_port,
                 address,
                 endpoint,
                 interface,
-            } => wg::hub_init(listen_port, &address, &endpoint, &interface),
+                force,
+            } => wg::hub_init(listen_port, &address, &endpoint, &interface, force),
             WgAction::HubAddPeer {
                 name,
                 pubkey,

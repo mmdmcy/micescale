@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod error;
+mod files;
 mod process;
 mod tailscale;
 

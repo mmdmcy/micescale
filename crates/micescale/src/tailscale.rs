@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use micescale_core::paths::TAILSCALE_BIN_ENV;
 
 use crate::AppError;
+use crate::files;
 use crate::process;
 
 pub fn binary() -> Result<String, AppError> {
@@ -24,22 +25,48 @@ pub fn binary() -> Result<String, AppError> {
     Ok("tailscale".into())
 }
 
-pub fn up(server: &str, node_name: Option<&str>, authkey: &str) -> Result<(), AppError> {
-    let mut args = vec![
-        "up",
-        "--login-server",
-        server,
-        "--authkey",
-        authkey,
-        // Required when switching a device from another control server (for
-        // example Tailscale cloud) to a self-hosted Headscale.
-        "--force-reauth",
-    ];
-    if let Some(name) = node_name {
-        args.push("--hostname");
-        args.push(name);
-    }
+/// `tailscale up` against a self-hosted control server. The auth key goes
+/// through a 0600 file (`--auth-key=file:PATH`) so it never shows up in argv.
+pub fn up(
+    server: &str,
+    node_name: Option<&str>,
+    authkey: &str,
+    force_reauth: bool,
+) -> Result<(), AppError> {
+    let key_path = env::temp_dir().join(format!("micescale-authkey-{}", std::process::id()));
+    files::write_private(&key_path, authkey)?;
+    let result = run_up(&up_args(server, node_name, &key_path, force_reauth));
+    let _ = std::fs::remove_file(&key_path);
+    result
+}
+
+fn run_up(args: &[String]) -> Result<(), AppError> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     process::run(&binary()?, &args)?.ok("tailscale up")
+}
+
+fn up_args(
+    server: &str,
+    node_name: Option<&str>,
+    key_path: &Path,
+    force_reauth: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "up".to_string(),
+        "--login-server".into(),
+        server.into(),
+        format!("--auth-key=file:{}", key_path.display()),
+    ];
+    // Only needed when switching a device from another control server (for
+    // example Tailscale cloud); it drops the current login, so it is opt-in.
+    if force_reauth {
+        args.push("--force-reauth".into());
+    }
+    if let Some(name) = node_name {
+        args.push("--hostname".into());
+        args.push(name.into());
+    }
+    args
 }
 
 pub fn logout() -> Result<(), AppError> {
@@ -104,6 +131,18 @@ mod tests {
         },
         "Health": []
     }"#;
+
+    #[test]
+    fn up_passes_the_key_by_file_and_reauths_only_on_request() {
+        let path = Path::new("/tmp/key");
+        let args = up_args("https://hs.example.com", Some("box"), path, false);
+        assert!(args.contains(&"--auth-key=file:/tmp/key".to_string()));
+        assert!(!args.iter().any(|arg| arg == "--authkey"));
+        assert!(!args.iter().any(|arg| arg == "--force-reauth"));
+        let args = up_args("https://hs.example.com", None, path, true);
+        assert!(args.iter().any(|arg| arg == "--force-reauth"));
+        assert!(!args.iter().any(|arg| arg == "--hostname"));
+    }
 
     #[test]
     fn parses_status_fixture() {

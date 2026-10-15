@@ -19,7 +19,8 @@ hub (lmice0)
 ```
 
 Only the hub needs a public endpoint. Clients use `AllowedIPs` to send traffic
-to each other through the hub (routing is the hub's job, not MiceScale's).
+to each other through the hub, and the rendered hub config forwards it (see
+[Spoke-to-spoke forwarding](#spoke-to-spoke-forwarding)).
 
 ## Hub setup (one-time, on the hub host)
 
@@ -30,14 +31,23 @@ micescale wg hub-init \
 ```
 
 This creates the hub identity under the state directory and renders
-`hub.conf` ready for `wg-quick` (or your distro's WireGuard unit). The private
-key lives only in `hub.key` / `hub.conf` (0600); it is never written to JSON
-state or the audit log.
+`lmice0.conf` ready for `wg-quick` (or your distro's WireGuard unit). The
+config is always named `<interface>.conf` (`--interface`, default `lmice0`)
+because `wg-quick` names the interface after the file stem; `status` and
+`doctor` look for that same name. The private key lives only in `hub.key` /
+`lmice0.conf` (0600, written atomically); it is never written to JSON state or
+the audit log.
+
+`hub-init` refuses to run when hub state already exists, since a new key
+invalidates every client and drops the peer list. `--force` starts over, after
+copying `hub.json`, `hub.key` and the old config to `<file>.bak-<unix-time>`
+(0600); nothing is deleted.
 
 Bring the interface up:
 
 ```bash
-sudo wg-quick up ~/.local/state/micescale/wireguard/hub.conf
+sudo micescale wg up
+# equivalent to: sudo wg-quick up ~/.local/state/micescale/wireguard/lmice0.conf
 ```
 
 Open the UDP listen port in the firewall (default 51820/UDP).
@@ -55,18 +65,39 @@ Register it on the hub:
 micescale wg hub-add-peer \
   --name laptop \
   --pubkey <client-public-key> \
-  --address 10.60.0.2/32
+  --address 10.60.0.2
 ```
 
-`hub-add-peer` re-renders `hub.conf`; apply it on the hub with:
+The address is a plain IP that must parse, lie inside the hub subnet, and not
+be the hub's own, the network or the broadcast address, or another peer's. The
+key must be a canonical 44-character base64 WireGuard key and not the hub's own.
+
+`hub-add-peer` (and `hub-remove-peer`, `hub-render`) re-renders the config and
+prints the command that applies it live, with the real path filled in:
 
 ```bash
-sudo wg-quick syncconf ~/.local/state/micescale/wireguard/hub.conf \
-  <(wg-quick strip ~/.local/state/micescale/wireguard/hub.conf)
+sudo bash -c 'wg syncconf lmice0 <(wg-quick strip /home/<you>/.local/state/micescale/wireguard/lmice0.conf)'
 ```
 
-(`syncconf` applies changes without dropping the interface; use `wg-quick up`
-on first run.)
+`wg syncconf` applies peer changes without dropping the interface. `wg-quick
+strip` is given the full path because a bare interface name only resolves
+under `/etc/wireguard`, and both tools need root, hence one `sudo bash -c`.
+If the interface is down, `sudo micescale wg up` instead.
+
+## Spoke-to-spoke forwarding
+
+Clients reach each other through the hub, so the hub config carries:
+
+```ini
+PostUp = sysctl -w net.ipv4.ip_forward=1; iptables -I FORWARD -i %i -o %i -j ACCEPT
+PostDown = iptables -D FORWARD -i %i -o %i -j ACCEPT
+```
+
+(`net.ipv6.conf.all.forwarding` / `ip6tables` for an IPv6 hub address.) This
+forwards only between peers on the WireGuard interface, not to the hub's LAN or
+the internet. `PostDown` removes the rule but leaves `ip_forward` on, since
+other services may rely on it. Hosts whose firewall (nftables-only, ufw, a
+custom chain) does not honour `iptables -I FORWARD` need an equivalent rule.
 
 ## Client setup (each device)
 
@@ -78,21 +109,25 @@ micescale wg client-init \
   --allowed-ips 10.60.0.0/24
 ```
 
-This writes `client.conf` and prints the exact `hub-add-peer` command to hand
-to the hub operator. Bring the tunnel up:
+`--allowed-ips` takes one or more comma-separated prefixes. This writes
+`lmice0.conf` (0600) and prints the exact `hub-add-peer` command to hand to the
+hub operator. Bring the tunnel up:
 
 ```bash
-sudo wg-quick up ~/.local/state/micescale/wireguard/client.conf
-# or, through the CLI (wraps wg-quick):
-micescale wg up
-micescale wg down
+sudo micescale wg up      # wraps wg-quick up .../lmice0.conf
+sudo micescale wg down
 ```
+
+Under `sudo`, MiceScale resolves `~` to `SUDO_USER`'s home (from
+`/etc/passwd`), so it finds the state written without sudo. To keep state
+elsewhere, pass the directory explicitly (sudo strips the environment):
+`sudo MICESCALE_WG_DIR=/srv/micescale/wg micescale wg up`.
 
 ## Day-to-day
 
 - `micescale wg status` — interface state, latest handshakes, transfer
   counters, and online/offline peers (text, `--format json|yaml`).
-- `micescale wg hub-render` — print the hub config without touching state.
+- `micescale wg hub-render` — re-render the hub config from `hub.json`.
 - `micescale wg hub-remove-peer --name <name>` — remove a peer and re-render.
 - `micescale leave` — bring the tunnel down and delete the local client state.
 - `micescale doctor` — reports the `wireguard-kernel` check and the client
@@ -106,7 +141,12 @@ Under `MICESCALE_WG_DIR` (default `~/.local/state/micescale/wireguard`):
 | --- | --- | --- |
 | `hub.json` / `client.json` | public registry: keys, addresses, peers (no secrets) | 0644 |
 | `hub.key` | hub private key | 0600 |
-| `hub.conf` / `client.conf` | full `wg-quick` config incl. private key | 0600 |
+| `<interface>.conf` (default `lmice0.conf`) | full `wg-quick` config incl. private key | 0600 |
+| `*.bak-<unix-time>` | copies kept by `hub-init --force` | 0600 |
+
+State from older versions used `hub.conf` / `client.conf`: run
+`micescale wg hub-render` on the hub, and on a client rename `client.conf` to
+`lmice0.conf` (or `<interface>.conf`).
 
 Audit events (`wg-hub-init`, `wg-hub-add-peer`, `wg-enroll`, `wg-up`,
 `wg-down`, `wg-leave`) never contain keys.

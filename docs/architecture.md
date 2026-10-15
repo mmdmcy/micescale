@@ -56,14 +56,15 @@ depends on a third-party coordinator.
 WireGuard carrier (coordination-free, no Tailscale code):
 
 ```text
-hub (micescale wg hub-init, hub.conf + hub.key)
-  <- client A: micescale wg client-init, client.conf
+hub (micescale wg hub-init, lmice0.conf + hub.key)
+  <- client A: micescale wg client-init, lmice0.conf
   <- client B
   micescale wg hub-add-peer / status / up / down / leave
 ```
 
 There is no registry, no coordinator, and no pre-auth key. The hub holds the
-peer list in `hub.json` and re-renders `hub.conf`; clients hold only their own
+peer list in `hub.json` and re-renders `<interface>.conf`, forwarding between
+spokes on its WireGuard interface; clients hold only their own
 config. Peer keys travel out-of-band. See
 [docs/wireguard-carrier.md](wireguard-carrier.md) for the full workflow.
 

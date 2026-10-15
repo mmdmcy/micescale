@@ -40,7 +40,7 @@ Hub host (one VPS):
 
 ```bash
 micescale wg hub-init --address 10.60.0.1/24 --endpoint hub.example.com:51820
-sudo wg-quick up ~/.local/state/micescale/wireguard/hub.conf
+sudo micescale wg up      # wg-quick up ~/.local/state/micescale/wireguard/lmice0.conf
 ```
 
 Each device:
@@ -51,7 +51,7 @@ micescale wg client-init \
   --endpoint hub.example.com:51820 \
   --hub-pubkey <hub-public-key> \
   --allowed-ips 10.60.0.0/24
-sudo wg-quick up ~/.local/state/micescale/wireguard/client.conf
+sudo micescale wg up
 micescale wg status
 ```
 
@@ -96,12 +96,12 @@ micescale version
 micescale carrier policy [--format json|yaml]
 micescale carrier profiles [--format json|yaml]
 micescale config show [--format json|yaml]
-micescale enroll --server <url> --authkey <key> [--node-name <name>] [--carrier headscale|wireguard]
-micescale wg hub-init --address <addr/prefix> --endpoint <host:port> [--listen-port N]
+micescale enroll --server <url> --authkey <key> [--node-name <name>] [--carrier headscale|wireguard] [--force-reauth]
+micescale wg hub-init --address <addr/prefix> --endpoint <host:port> [--listen-port N] [--interface lmice0] [--force]
 micescale wg hub-add-peer --name <name> --pubkey <key> --address <addr>
 micescale wg hub-remove-peer --name <name>
 micescale wg hub-render
-micescale wg client-init --address <addr/prefix> --endpoint <host:port> --hub-pubkey <key> --allowed-ips <prefix>
+micescale wg client-init --address <addr/prefix> --endpoint <host:port> --hub-pubkey <key> --allowed-ips <prefix>[,<prefix>] [--interface lmice0]
 micescale wg up|down
 micescale wg status [--format json|yaml]
 micescale status [--format json|yaml]
@@ -112,8 +112,9 @@ micescale audit tail [--limit N] [--format json|yaml]
 
 All output supports structured JSON/YAML. Secrets are never stored in config,
 audit logs, or tracked files; auth keys exist only in the process environment
-and the underlying `tailscale` call, and WireGuard private keys only in 0600
-`*.key`/`*.conf` files under the WireGuard state directory.
+and a short-lived 0600 file handed to `tailscale up --auth-key=file:PATH`
+(never argv), and WireGuard private keys only in 0600 `*.key`/`*.conf` files
+under the WireGuard state directory.
 
 ## Configuration
 
@@ -132,6 +133,12 @@ Environment overrides:
 | `MICESCALE_WG_BIN` | `wg` binary path (default: `wg`) |
 | `MICESCALE_WGQUICK_BIN` | `wg-quick` binary path (default: `wg-quick`) |
 | `MICESCALE_WG_DIR` | WireGuard state directory (default: `~/.local/state/micescale/wireguard`) |
+
+Under `sudo` (`USER=root` with `SUDO_USER` set), `~` means the invoking user's
+home from `/etc/passwd`, not `/root`, so `sudo micescale wg up` finds the state
+written by `micescale wg client-init`. `sudo` drops most environment variables;
+pass overrides explicitly if needed, e.g.
+`sudo MICESCALE_WG_DIR=/srv/micescale/wg micescale wg up`.
 
 ## How it fits
 

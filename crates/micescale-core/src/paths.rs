@@ -30,16 +30,46 @@ pub fn state_dir() -> PathBuf {
         .join("micescale")
 }
 
+/// The invoking user's home. Under `sudo` (USER=root, SUDO_USER set) this is
+/// SUDO_USER's home from /etc/passwd, so `sudo micescale wg up` finds the
+/// state written by the unprivileged user instead of looking under /root.
 pub fn home_dir() -> PathBuf {
+    let sudo_user = env::var("SUDO_USER").ok().filter(|user| {
+        !user.is_empty() && user != "root" && env::var("USER").as_deref() == Ok("root")
+    });
+    if let Some(user) = sudo_user {
+        let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+        if let Some(home) = passwd_home(&passwd, &user) {
+            return home;
+        }
+    }
     env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Home directory of `user` in /etc/passwd format (name:pw:uid:gid:gecos:home:shell).
+pub fn passwd_home(passwd: &str, user: &str) -> Option<PathBuf> {
+    passwd.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        (fields.len() >= 7 && fields[0] == user && !fields[5].is_empty())
+            .then(|| PathBuf::from(fields[5]))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passwd_home_finds_the_sudo_user() {
+        let passwd = "root:x:0:0:root:/root:/bin/bash\n# comment\nmac:x:1000:1000:Mac,,,:/home/mac:/bin/bash\nbroken:x:1\n";
+        assert_eq!(passwd_home(passwd, "mac"), Some(PathBuf::from("/home/mac")));
+        assert_eq!(passwd_home(passwd, "root"), Some(PathBuf::from("/root")));
+        assert_eq!(passwd_home(passwd, "ma"), None);
+        assert_eq!(passwd_home(passwd, "broken"), None);
+    }
 
     #[test]
     fn config_env_overrides_default() {

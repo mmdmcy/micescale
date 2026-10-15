@@ -16,14 +16,14 @@ authorization never depended on the carrier.
 
 ```sh
 export MICESCALE_AUTHKEY="<short-lived-key>"
-micescale enroll --server https://<control.example.com> --node-name <hostname>
+micescale enroll --server https://<control.example.com> --node-name <hostname> --force-reauth
 micescale status      # node appears under the self-hosted control server
 micescale doctor
 ```
 
-The enroll flow uses `--force-reauth` automatically, which is required when a
-device is already logged in to another control server (for example Tailscale
-cloud).
+`--force-reauth` is required when a device is already logged in to another
+control server (for example Tailscale cloud). It is opt-in: without the flag,
+`enroll` does not touch an existing login.
 
 ## Verify the migration
 

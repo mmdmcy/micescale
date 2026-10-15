@@ -39,6 +39,7 @@ fn run_with(dir: &Path, args: &[&str], tailscale_bin: &str) -> (i32, String, Str
         .env("MICESCALE_CONFIG", dir.join("config.toml"))
         .env("MICESCALE_AUDIT_LOG", dir.join("audit.jsonl"))
         .env("MICESCALE_TAILSCALE_BIN", tailscale_bin)
+        .env("FAKE_LOG", dir.join("fake.log"))
         .output()
         .unwrap();
     (
@@ -87,6 +88,11 @@ fn full_enroll_status_leave_cycle_without_secrets() {
     let audit = fs::read_to_string(root.join("audit.jsonl")).unwrap();
     assert!(!config.contains("top-secret-key"), "config leaked the key");
     assert!(!audit.contains("top-secret-key"), "audit leaked the key");
+
+    let calls = fs::read_to_string(root.join("fake.log")).unwrap();
+    assert!(calls.contains("--auth-key=file:"), "{calls}");
+    assert!(!calls.contains("top-secret-key"), "argv leaked the key");
+    assert!(!calls.contains("--force-reauth"), "reauth must be opt-in");
 }
 
 #[test]

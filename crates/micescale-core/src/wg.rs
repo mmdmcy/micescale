@@ -1,15 +1,88 @@
+use std::net::IpAddr;
+
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_INTERFACE: &str = "lmice0";
 pub const DEFAULT_PORT: u16 = 51820;
 pub const DEFAULT_PERSISTENT_KEEPALIVE: u16 = 25;
 
-/// True for base64-encoded 32-byte WireGuard keys (43 or 44 chars).
+const BASE64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// True for canonical base64 encodings of a 32-byte WireGuard key: 43 base64
+/// characters plus one `=`, with the unused low bits of the last character
+/// zero (the only form `wg` itself emits and accepts).
 pub fn is_wg_key(value: &str) -> bool {
-    (value.len() == 43 || value.len() == 44)
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/' || byte == b'='
-        })
+    let bytes = value.as_bytes();
+    if bytes.len() != 44 || bytes[43] != b'=' {
+        return false;
+    }
+    let mut last = 0;
+    for byte in &bytes[..43] {
+        match BASE64.iter().position(|candidate| candidate == byte) {
+            Some(index) => last = index,
+            None => return false,
+        }
+    }
+    last & 0b11 == 0
+}
+
+/// True for names `wg-quick` accepts as an interface (it names the interface
+/// after the config file stem, so `<name>.conf` must pass this too).
+pub fn is_interface_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 15
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_=+.-".contains(&byte))
+}
+
+/// An address with prefix length, e.g. 10.60.0.1/24.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cidr {
+    pub addr: IpAddr,
+    pub prefix: u8,
+}
+
+impl Cidr {
+    pub fn parse(value: &str) -> Option<Cidr> {
+        let (addr, prefix) = value.split_once('/')?;
+        let addr: IpAddr = addr.parse().ok()?;
+        let prefix: u8 = prefix.parse().ok()?;
+        let max = if addr.is_ipv4() { 32 } else { 128 };
+        (prefix <= max).then_some(Cidr { addr, prefix })
+    }
+
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        match (self.addr, ip) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                let mask = u32::MAX
+                    .checked_shl(32 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                u32::from(net) & mask == u32::from(ip) & mask
+            }
+            (IpAddr::V6(net), IpAddr::V6(ip)) => {
+                let mask = u128::MAX
+                    .checked_shl(128 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                u128::from(net) & mask == u128::from(ip) & mask
+            }
+            _ => false,
+        }
+    }
+
+    /// True when `ip` has the host bits of an IPv4 network or broadcast
+    /// address for this prefix (/31 and /32 have neither).
+    pub fn is_reserved(&self, ip: IpAddr) -> bool {
+        let IpAddr::V4(ip) = ip else {
+            return false;
+        };
+        if !self.addr.is_ipv4() || self.prefix >= 31 {
+            return false;
+        }
+        let host_mask = u32::MAX >> self.prefix;
+        let host = u32::from(ip) & host_mask;
+        host == 0 || host == host_mask
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,6 +109,18 @@ impl HubState {
         out.push_str(&format!("PrivateKey = {private_key}\n"));
         out.push_str(&format!("Address = {}\n", self.address));
         out.push_str(&format!("ListenPort = {}\n", self.listen_port));
+        // Spokes reach each other through the hub, so it must forward between
+        // peers on its own interface. The sysctl is left on at PostDown.
+        let (sysctl, iptables) = match Cidr::parse(&self.address).map(|cidr| cidr.addr) {
+            Some(IpAddr::V6(_)) => ("net.ipv6.conf.all.forwarding", "ip6tables"),
+            _ => ("net.ipv4.ip_forward", "iptables"),
+        };
+        out.push_str(&format!(
+            "PostUp = sysctl -w {sysctl}=1; {iptables} -I FORWARD -i %i -o %i -j ACCEPT\n"
+        ));
+        out.push_str(&format!(
+            "PostDown = {iptables} -D FORWARD -i %i -o %i -j ACCEPT\n"
+        ));
         for peer in &self.peers {
             out.push('\n');
             out.push_str("[Peer]\n");
@@ -157,6 +242,79 @@ mod tests {
         assert!(!is_wg_key("not base64 !!! !!! !!! !!! !!! !!! !!! !!! 12"));
         assert!(!is_wg_key("eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eA"));
         assert!(!is_wg_key("eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg==x"));
+    }
+
+    #[test]
+    fn key_validation_requires_canonical_32_bytes() {
+        // 43 chars without padding, wrong padding, non-zero trailing bits.
+        assert!(!is_wg_key(&HUB_PUBLIC[..43]));
+        assert!(!is_wg_key(&format!("{}A", &HUB_PUBLIC[..43])));
+        assert!(!is_wg_key("aHViLXB1YmxpYy1rZXktY29yZS1odWItcHVibGljLWt="));
+        assert!(is_wg_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="));
+    }
+
+    #[test]
+    fn interface_names_match_wg_quick_rules() {
+        assert!(is_interface_name("lmice0"));
+        assert!(is_interface_name("wg_hub.1"));
+        assert!(!is_interface_name(""));
+        assert!(!is_interface_name("sixteen-chars-xx"));
+        assert!(!is_interface_name("../etc"));
+        assert!(!is_interface_name("a b"));
+    }
+
+    #[test]
+    fn cidr_parses_and_checks_membership() {
+        let net = Cidr::parse("10.60.0.1/24").unwrap();
+        assert!(net.contains("10.60.0.2".parse().unwrap()));
+        assert!(!net.contains("10.61.0.2".parse().unwrap()));
+        assert!(!net.contains("fd00::2".parse().unwrap()));
+        assert!(net.is_reserved("10.60.0.0".parse().unwrap()));
+        assert!(net.is_reserved("10.60.0.255".parse().unwrap()));
+        assert!(!net.is_reserved("10.60.0.254".parse().unwrap()));
+        assert!(
+            !Cidr::parse("10.60.0.1/31")
+                .unwrap()
+                .is_reserved("10.60.0.0".parse().unwrap())
+        );
+        assert!(
+            Cidr::parse("0.0.0.0/0")
+                .unwrap()
+                .contains("8.8.8.8".parse().unwrap())
+        );
+        let v6 = Cidr::parse("fd00:60::1/64").unwrap();
+        assert!(v6.contains("fd00:60::9".parse().unwrap()));
+        assert!(!v6.contains("fd00:61::9".parse().unwrap()));
+        for bad in [
+            "999.1.1.1/24",
+            "10.60.0.1",
+            "10.60.0.1/33",
+            "10.60.0.1/x",
+            "fd00::1/129",
+        ] {
+            assert_eq!(Cidr::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn hub_render_forwards_between_peers() {
+        let mut hub = HubState {
+            interface: DEFAULT_INTERFACE.into(),
+            listen_port: 51820,
+            address: "10.60.0.1/24".into(),
+            endpoint: "hub.example.com:51820".into(),
+            pubkey: HUB_PUBLIC.into(),
+            peers: Vec::new(),
+        };
+        let rendered = hub.render_config(HUB_PRIVATE);
+        assert!(rendered.contains(
+            "PostUp = sysctl -w net.ipv4.ip_forward=1; iptables -I FORWARD -i %i -o %i -j ACCEPT\n"
+        ));
+        assert!(rendered.contains("PostDown = iptables -D FORWARD -i %i -o %i -j ACCEPT\n"));
+        hub.address = "fd00:60::1/64".into();
+        let rendered = hub.render_config(HUB_PRIVATE);
+        assert!(rendered.contains("sysctl -w net.ipv6.conf.all.forwarding=1; ip6tables -I"));
+        assert!(rendered.contains("PostDown = ip6tables -D FORWARD"));
     }
 
     #[test]
